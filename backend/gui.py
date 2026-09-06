@@ -1,10 +1,10 @@
 import sys
 import time
 import math
+import threading
 
 from PySide6.QtCore import (
     QObject,
-    QThread,
     Signal,
     Slot,
     Qt,
@@ -19,6 +19,7 @@ from PySide6.QtGui import (
     QBrush,
     QRadialGradient,
     QPainter,
+    QTextCursor,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -33,7 +34,7 @@ from PySide6.QtWidgets import (
     QFrame,
 )
 
-from brain import ask_jarvis
+from brain import ask_jarvis_stream, warmup
 from voice import wait_for_wake_word, listen_command
 from tts import speak
 
@@ -88,6 +89,7 @@ STATE_COLORS = {
 # ============================================================
 
 class JarvisWorker(QObject):
+    token = Signal(str)
     finished = Signal(str)
     error = Signal(str)
 
@@ -95,10 +97,20 @@ class JarvisWorker(QObject):
         super().__init__()
         self.message = message
 
-    @Slot()
     def run(self):
         try:
-            answer = ask_jarvis(self.message)
+            parts = []
+
+            for piece in ask_jarvis_stream(self.message):
+
+                if piece.strip():
+                    parts.append(piece)
+                    self.token.emit(piece)
+
+            if parts:
+                answer = "".join(parts)
+            else:
+                answer = ""
 
             if answer is None:
                 answer = ""
@@ -552,16 +564,30 @@ class JarvisWindow(QMainWindow):
         self.voice_thread = None
         self.voice_worker = None
 
-        self.tts_thread = None
-        self.tts_worker = None
-
         self.processing = False
 
         self.voice_enabled = True
 
+        self.processing = False
+        self._pending_message = None
+        self._stream_active = False
+
+        # temporizador: muestra segundos de procesamiento
+        self._proc_start = 0.0
+        self._proc_timer = QTimer(self)
+        self._proc_timer.setInterval(1000)
+        self._proc_timer.timeout.connect(self._update_proc_time)
+
         self.setup_ui()
 
         self.start_voice()
+
+        # Calentar el modelo en segundo plano para evitar
+        # los ~25s de arranque en frío en el primer mensaje.
+        threading.Thread(
+            target=warmup,
+            daemon=True
+        ).start()
 
     # ========================================================
     # UI
@@ -981,7 +1007,21 @@ class JarvisWindow(QMainWindow):
         if not message:
             return
 
+        # Si JARVIS sigue procesando, encolamos el mensaje
+        # en lugar de ignorarlo silenciosamente.
         if self.processing:
+
+            if self._pending_message is None:
+
+                self._pending_message = message
+                self.input_box.clear()
+
+                self.append_system_message(
+                    "Mensaje en cola, se enviará al terminar..."
+                )
+
+            # con un pendiente ya activo no se pierde lo que
+            # hay escrito en la caja
             return
 
         self.input_box.clear()
@@ -992,47 +1032,79 @@ class JarvisWindow(QMainWindow):
     # PROCESAMIENTO QWEN
     # ========================================================
 
+    def _update_proc_time(self):
+
+        elapsed = int(
+            time.monotonic() - self._proc_start
+        )
+
+        self.hud_state.setText(
+            f"CEREBRO {elapsed}s"
+        )
+
     def start_processing(self, message):
 
         if self.processing:
             return
 
         self.processing = True
+        self._stream_active = False
         self.set_state("PROCESSING")
         self.send_button.setEnabled(False)
 
-        thread = QThread()
+        self._proc_start = time.monotonic()
+        self._proc_timer.start()
+
         worker = JarvisWorker(message)
-        worker.moveToThread(thread)
 
-        thread.started.connect(worker.run)
-
+        worker.token.connect(self.on_token)
         worker.finished.connect(self.on_response)
         worker.error.connect(self.on_error)
 
-        worker.finished.connect(thread.quit)
-        worker.error.connect(thread.quit)
-
-        thread.finished.connect(worker.deleteLater)
+        thread = threading.Thread(
+            target=worker.run,
+            daemon=True,
+        )
+        thread.start()
 
         self.active_threads.append(thread)
+        self._active_work = worker
 
-        def cleanup():
-            if thread in self.active_threads:
-                self.active_threads.remove(thread)
-            thread.deleteLater()
+    @Slot(str)
+    def on_token(self, piece):
 
-        thread.finished.connect(cleanup)
-        thread.start()
+        # inserta el encabezado solo la primera vez
+        if not self._stream_active:
+
+            self._stream_active = True
+
+            self.chat.append(
+                """
+                <div style="margin-top:12px; margin-bottom:4px;
+                     color:#b78cff; font-weight:bold;">
+                    ◈ J.A.R.V.I.S
+                </div>
+                """
+            )
+
+        cursor = self.chat.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertHtml(
+            self.escape_html(piece)
+        )
+
+        self.scroll_chat()
 
     @Slot(str)
     def on_response(self, answer):
 
         self.processing = False
         self.send_button.setEnabled(True)
+        self._proc_timer.stop()
+        self._stream_active = False
 
+        # La respuesta ya se mostró pieza a pieza con on_token.
         if answer:
-            self.append_jarvis_message(answer)
             self.set_state("SPEAKING")
             self.start_tts(answer)
         else:
@@ -1043,6 +1115,7 @@ class JarvisWindow(QMainWindow):
 
         self.processing = False
         self.send_button.setEnabled(True)
+        self._stream_active = False
         self.append_system_message(f"Error: {error}")
         self.finish_processing()
 
@@ -1052,41 +1125,27 @@ class JarvisWindow(QMainWindow):
 
     def start_tts(self, text):
 
-        thread = QThread()
         worker = TTSWorker(text)
-        worker.moveToThread(thread)
-
-        thread.started.connect(worker.run)
 
         worker.finished.connect(self.on_tts_finished)
         worker.error.connect(self.on_tts_error)
 
-        worker.finished.connect(thread.quit)
-        worker.error.connect(thread.quit)
-
-        thread.finished.connect(worker.deleteLater)
+        thread = threading.Thread(
+            target=worker.run,
+            daemon=True,
+        )
+        thread.start()
 
         self.active_tts_threads.append(thread)
-
-        def cleanup():
-            if thread in self.active_tts_threads:
-                self.active_tts_threads.remove(thread)
-            thread.deleteLater()
-
-        thread.finished.connect(cleanup)
-        thread.start()
+        self._active_tts_work = worker
 
     @Slot()
     def on_tts_finished(self):
         self.finish_processing()
-        if self.tts_thread is not None:
-            self.tts_thread.quit()
 
     @Slot(str)
     def on_tts_error(self, error):
         self.append_system_message(f"Error de voz: {error}")
-        if self.tts_thread is not None:
-            self.tts_thread.quit()
         self.finish_processing()
 
     # ========================================================
@@ -1096,7 +1155,16 @@ class JarvisWindow(QMainWindow):
     def finish_processing(self):
         self.processing = False
         self.send_button.setEnabled(True)
+        self._proc_timer.stop()
         self.set_state("WAITING")
+
+        # Si quedó un mensaje en cola, enviarlo ahora.
+        pending = self._pending_message
+        self._pending_message = None
+
+        if pending:
+            self.append_user_message(pending)
+            self.start_processing(pending)
 
     # ========================================================
     # VOZ
@@ -1105,7 +1173,7 @@ class JarvisWindow(QMainWindow):
     def start_voice(self):
 
         if self.voice_thread is not None:
-            if self.voice_thread.isRunning():
+            if self.voice_thread.is_alive():
                 return
 
         self.voice_enabled = True
@@ -1114,11 +1182,7 @@ class JarvisWindow(QMainWindow):
         self.mic_button.setText("MIC ON")
         self.mic_button.setStyleSheet(self._button_stylesheet("#4ef2a1", "#0d241b"))
 
-        self.voice_thread = QThread()
         self.voice_worker = VoiceWorker()
-        self.voice_worker.moveToThread(self.voice_thread)
-
-        self.voice_thread.started.connect(self.voice_worker.run)
 
         self.voice_worker.wake_detected.connect(self.on_wake_detected)
         self.voice_worker.listening_started.connect(self.on_listening_started)
@@ -1126,10 +1190,12 @@ class JarvisWindow(QMainWindow):
         self.voice_worker.processing_started.connect(self.on_voice_processing)
         self.voice_worker.error.connect(self.on_voice_error)
 
-        self.voice_thread.finished.connect(self.voice_worker.deleteLater)
-        self.voice_thread.finished.connect(self.voice_thread.deleteLater)
-
-        self.voice_thread.start()
+        thread = threading.Thread(
+            target=self.voice_worker.run,
+            daemon=True,
+        )
+        thread.start()
+        self.voice_thread = thread
 
     def stop_voice(self):
 
@@ -1139,9 +1205,8 @@ class JarvisWindow(QMainWindow):
             self.voice_worker.stop()
 
         if self.voice_thread is not None:
-            if self.voice_thread.isRunning():
-                self.voice_thread.quit()
-                self.voice_thread.wait(2000)
+            if self.voice_thread.is_alive():
+                self.voice_thread.join(timeout=2000)
 
         self.voice_worker = None
         self.voice_thread = None
@@ -1197,14 +1262,12 @@ class JarvisWindow(QMainWindow):
         self.stop_voice()
 
         for thread in self.active_threads:
-            if thread.isRunning():
-                thread.quit()
-                thread.wait(2000)
+            if thread.is_alive():
+                thread.join(timeout=2000)
 
         for thread in self.active_tts_threads:
-            if thread.isRunning():
-                thread.quit()
-                thread.wait(2000)
+            if thread.is_alive():
+                thread.join(timeout=2000)
 
         event.accept()
 

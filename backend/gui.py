@@ -1,5 +1,6 @@
 import sys
 import time
+import math
 
 from PySide6.QtCore import (
     QObject,
@@ -8,10 +9,17 @@ from PySide6.QtCore import (
     Slot,
     Qt,
     QTimer,
-    QPropertyAnimation,
-    QEasingCurve,
+    QRectF,
+    QPointF,
 )
-from PySide6.QtGui import QFont
+from PySide6.QtGui import (
+    QFont,
+    QColor,
+    QPen,
+    QBrush,
+    QRadialGradient,
+    QPainter,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -23,12 +31,56 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QFrame,
-    QSizePolicy,
 )
 
 from brain import ask_jarvis
 from voice import wait_for_wake_word, listen_command
 from tts import speak
+
+
+# ============================================================
+# PALETA HOLOGRÁFICA
+# ============================================================
+
+class Palette:
+    BG = "#04070c"
+    BG_PANEL = "#0a1018"
+
+    # cian (estado base / JARVIS)
+    CYAN = "#39d6ff"
+    CYAN_DIM = "#1c6d8a"
+    CYAN_GLOW = "#7ceaff"
+
+    # verde (escuchando)
+    GREEN = "#4ef2a1"
+    GREEN_DIM = "#1f6d4a"
+
+    # ámbar (procesando)
+    AMBER = "#ffc857"
+    AMBER_DIM = "#8a6a1c"
+
+    # violeta (hablando)
+    VIOLET = "#b78cff"
+    VIOLET_DIM = "#5a3f8a"
+
+    GRID = "#10242f"
+    TEXT = "#d8f4ff"
+    TEXT_DIM = "#4e7a8a"
+    TEXT_FAINT = "#2c4a57"
+
+    MONO = "Consolas"
+
+
+# ============================================================
+# ESTADO -> COLOR
+# ============================================================
+
+STATE_COLORS = {
+    "WAITING":   {"main": "#39d6ff", "dim": "#1c6d8a", "glow": "#7ceaff"},
+    "LISTENING": {"main": "#4ef2a1", "dim": "#1f6d4a", "glow": "#a3ffd1"},
+    "PROCESSING": {"main": "#ffc857", "dim": "#8a6a1c", "glow": "#ffe2a1"},
+    "SPEAKING":  {"main": "#b78cff", "dim": "#5a3f8a", "glow": "#e0d0ff"},
+}
 
 
 # ============================================================
@@ -146,124 +198,302 @@ class VoiceWorker(QObject):
 
 
 # ============================================================
-# NÚCLEO CENTRAL
+# NÚCLEO HOLOGRÁFICO — ESFERA 3D TIPO JARVIS (IRON MAN)
 # ============================================================
 
-class CoreWidget(QWidget):
+class HoloCore(QWidget):
+    """Esfera/globo holográfico 3D tipo JARVIS: una nube densa
+    de puntos sobre una esfera proyectada en perspectiva (puntos
+    cercanos más grandes y brillantes), con núcleo pulsante,
+    anillo orbital elíptico inclinado, arcos HUD discontinuos y
+    un anillo exterior de marcas de graduación."""
+
+    N_POINTS = 620
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self.setFixedSize(220, 220)
+        self.setFixedSize(380, 380)
 
-        self.animation = None
-        self.pulse_animation = None
+        self._angle = 0.0
+        self._tick = 0
+        self.state = "WAITING"
+        self.pulse = 1.0
 
-        self.core = QLabel(self)
-        self.core.setAlignment(Qt.AlignCenter)
+        # inclinación del globo (rotación Y fija para darle 3D)
+        self.tilt_x = 0.42   # radianes
+        self.tilt_y = 0.30
 
-        self.core.setFixedSize(150, 150)
+        # marcas de graduación exteriores
+        self.ticks = 72
 
-        self.core.move(35, 35)
+        self._build_sphere()
 
-        self.core.setText("J")
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._advance)
+        self.timer.start(16)
 
-        self.core.setFont(
-            QFont("Segoe UI", 32, QFont.Bold)
-        )
+    # --------------------------------------------------------
+    # Construcción de la nube de puntos (esfera de Fibonacci)
+    # --------------------------------------------------------
 
-        self.core.setStyleSheet("""
-            QLabel {
-                background-color: #101820;
-                color: #6fdcff;
-                border: 2px solid #3abff8;
-                border-radius: 75px;
-            }
-        """)
+    def _build_sphere(self):
+        pts = []
+        n = HoloCore.N_POINTS
+        golden = math.pi * (3.0 - math.sqrt(5.0))
+        for i in range(n):
+            y = 1.0 - (i / float(n - 1)) * 2.0
+            r = math.sqrt(max(0.0, 1.0 - y * y))
+            theta = golden * i
+            x = math.cos(theta) * r
+            z = math.sin(theta) * r
+            pts.append((x, y, z))
+        self._points = pts
 
-        self.glow = QLabel(self)
-        self.glow.setGeometry(10, 10, 200, 200)
+    # --------------------------------------------------------
+    # Animación
+    # --------------------------------------------------------
 
-        self.glow.lower()
+    def _advance(self):
+        self._angle += 0.5  # grados, ajustado por estado abajo
+        self._tick += 1
+        self.pulse += 0.025
+        if self.pulse > 1.0:
+            self.pulse = 1.0
+        self.update()
 
-        self.glow.setStyleSheet("""
-            QLabel {
-                background-color: transparent;
-                border: 1px solid #1d6d8a;
-                border-radius: 100px;
-            }
-        """)
-
-        self.start_animation()
-
-    def start_animation(self):
-
-        self.pulse_animation = QPropertyAnimation(
-            self.core,
-            b"minimumSize"
-        )
-
-        self.pulse_animation.setDuration(1400)
-        self.pulse_animation.setStartValue(self.core.minimumSize())
-        self.pulse_animation.setEndValue(self.core.minimumSize())
-
-        self.pulse_animation.setEasingCurve(
-            QEasingCurve.InOutSine
-        )
+    # --------------------------------------------------------
+    # Estado
+    # --------------------------------------------------------
 
     def set_state(self, state):
+        self.state = state
+        self.pulse = 0.25
+        self.update()
 
-        if state == "WAITING":
+    def _colors(self):
+        return STATE_COLORS.get(
+            self.state,
+            STATE_COLORS["WAITING"],
+        )
 
-            self.core.setText("J")
+    def _breath_scale(self):
+        # el globo "respira" en reposo y pulsa fuerte al hablar
+        if self.state == "SPEAKING":
+            return 1.0 + 0.045 * math.sin((self._tick / 8.0))
+        if self.state in ("LISTENING", "PROCESSING"):
+            return 1.0 + 0.02 * math.sin(self._tick / 10.0)
+        return 1.0 + 0.012 * math.sin(self._tick / 26.0)
 
-            self.core.setStyleSheet("""
-                QLabel {
-                    background-color: #101820;
-                    color: #6fdcff;
-                    border: 2px solid #3abff8;
-                    border-radius: 75px;
-                }
-            """)
+    # --------------------------------------------------------
+    # Pintado
+    # --------------------------------------------------------
 
-        elif state == "LISTENING":
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
 
-            self.core.setText("●")
+        w = self.width()
+        h = self.height()
+        cx = w / 2.0
+        cy = h / 2.0
 
-            self.core.setStyleSheet("""
-                QLabel {
-                    background-color: #10251f;
-                    color: #55e6a5;
-                    border: 3px solid #55e6a5;
-                    border-radius: 75px;
-                }
-            """)
+        col = self._colors()
+        main = QColor(col["main"])
+        glow = QColor(col["glow"])
+        dim = QColor(col["dim"])
 
-        elif state == "PROCESSING":
+        self._paint_glow(painter, cx, cy, main, glow)
+        self._paint_ticks(painter, cx, cy, dim, glow)
+        self._paint_hud_arcs(painter, cx, cy, main, dim, glow)
+        self._paint_sphere(painter, cx, cy, main, glow)
+        self._paint_orbit_ring(painter, cx, cy, main, glow)
+        self._paint_core(painter, cx, cy, glow, main)
 
-            self.core.setText("···")
+        painter.end()
 
-            self.core.setStyleSheet("""
-                QLabel {
-                    background-color: #211c10;
-                    color: #ffd166;
-                    border: 3px solid #ffd166;
-                    border-radius: 75px;
-                }
-            """)
+    def _paint_glow(self, painter, cx, cy, main, glow):
+        r = QRadialGradient(QPointF(cx, cy), 185)
+        base = QColor(main)
+        base.setAlpha(34)
+        r.setColorAt(0.0, base)
+        outer = QColor(main)
+        outer.setAlpha(4)
+        r.setColorAt(1.0, outer)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(r))
+        painter.drawEllipse(QRectF(cx - 185, cy - 185, 370, 370))
 
-        elif state == "SPEAKING":
+    def _paint_ticks(self, painter, cx, cy, dim, glow):
+        R = 178
+        long_t = QColor(glow)
+        long_t.setAlpha(150)
+        width = 2 if self._tick % 6 == 0 else 1
+        for i in range(self.ticks):
+            a = math.radians((360.0 / self.ticks) * i)
+            x0 = cx + R * math.cos(a)
+            y0 = cy + R * math.sin(a)
+            ln = 8 if i % 6 == 0 else 4
+            x1 = cx + (R - ln) * math.cos(a)
+            y1 = cy + (R - ln) * math.sin(a)
+            c = QColor(glow) if i % 6 == 0 else QColor(dim)
+            pen = QPen(c)
+            pen.setWidthF(width)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(x0, y0), QPointF(x1, y1))
 
-            self.core.setText("J")
+    def _paint_hud_arcs(self, painter, cx, cy, main, dim, glow):
+        arcs = [
+            {"r": 150, "w": 1.2, "span": 120, "speed": 0.9},
+            {"r": 128, "w": 2.4, "span": 80,  "speed": -1.4},
+            {"r": 108, "w": 1.0, "span": 220, "speed": 0.6},
+            {"r": 72,  "w": 1.8, "span": 100, "speed": -1.0},
+        ]
+        for i, a in enumerate(arcs[:2]):
+            pen = QPen(QColor(dim))
+            pen.setWidth(1)
+            pen.setStyle(Qt.DashLine)
+            painter.setOpacity(0.5)
+            painter.setPen(pen)
+            painter.drawEllipse(QRectF(cx - a["r"], cy - a["r"],
+                                       a["r"] * 2, a["r"] * 2))
+            painter.setOpacity(1.0)
+        for i, a in enumerate(arcs):
+            start = (self._angle * a["speed"] * 6 + i * 90) % 360.0
+            pen = QPen(QColor(glow))
+            pen.setWidthF(a["w"])
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            painter.setOpacity(0.85)
+            painter.drawArc(
+                QRectF(cx - a["r"], cy - a["r"], a["r"] * 2, a["r"] * 2),
+                int(-start * 16), int(-a["span"] * 16),
+            )
+            painter.setOpacity(1.0)
 
-            self.core.setStyleSheet("""
-                QLabel {
-                    background-color: #19142a;
-                    color: #b78cff;
-                    border: 3px solid #b78cff;
-                    border-radius: 75px;
-                }
-            """)
+    def _paint_sphere(self, painter, cx, cy, main, glow):
+        scale = self._breath_scale()
+        R = 66 * scale
+
+        tx = self._angle * math.pi / 180.0
+        siny, cosy = math.sin(self.tilt_y), math.cos(self.tilt_y)
+        sinx, cosx = math.sin(self.tilt_x), math.cos(self.tilt_x)
+
+        for (px, py, pz) in self._points:
+            # rotar Y (giro continuo del globo)
+            x1 = px * cosy + pz * siny
+            z1 = -px * siny + pz * cosy
+            # rotar X (inclinación fija)
+            y1 = py * cosx - z1 * sinx
+            z2 = py * sinx + z1 * cosx
+
+            # el giro continuo: añadir rotación alrededor del eje Y
+            ang = tx
+            x2 = x1 * math.cos(ang) - z2 * math.sin(ang)
+            z3 = x1 * math.sin(ang) + z2 * math.cos(ang)
+
+            depth = z3  # profundidad de perspectiva
+
+            # proyección simple en perspectiva
+            persp = 1.0 + depth * 0.35
+            sx = cx + x2 * R * persp
+            sy = cy + y1 * R * persp
+
+            # brillo/tamaño según profundidad (3D)
+            if depth < 0:
+                brightness = 0.25 + 0.55 * (1.0 + depth / 1.0)
+                size = 1.0 + 2.6 * (1.0 + depth / 1.0)
+            else:
+                brightness = 0.15 + 0.25 * (1.0 - depth / 1.0)
+                size = 0.8 + 0.6 * (1.0 - depth / 1.0)
+
+            c = QColor(glow)
+            c.setAlphaF(max(0.05, min(1.0, brightness)))
+            pen = QPen(c)
+            pen.setWidthF(max(0.6, size * 0.55))
+            painter.setPen(pen)
+            painter.drawPoint(QPointF(sx, sy))
+
+        # contorno suave del globo
+        rim = QPen(QColor(main))
+        rim.setWidthF(1.2)
+        rim.setColor(QColor(glow))
+        painter.setOpacity(0.5)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(QRectF(cx - R, cy - R, R * 2, R * 2))
+        painter.setOpacity(1.0)
+
+    def _paint_orbit_ring(self, painter, cx, cy, main, glow):
+        # anillo orbital elíptico inclinado alrededor del globo
+        rot = math.radians(self._angle * 2.0 + 45)
+        tilt = math.radians(24.0)
+        rx = 115
+        ry = rx * math.cos(tilt) * 0.85
+
+        painter.save()
+        painter.translate(cx, cy)
+        painter.rotate(9.0)
+
+        base_col = QColor(main)
+        base_col.setAlpha(90)
+        pen = QPen(base_col)
+        pen.setWidth(1)
+        painter.setOpacity(0.55)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(QRectF(-rx, -ry, rx * 2, ry * 2))
+        painter.setOpacity(1.0)
+
+        # marcador brillante orbitando la elipse
+        ox = rx * math.cos(rot)
+        oy = ry * math.sin(rot)
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(glow)))
+        painter.drawEllipse(QRectF(ox - 4, oy - 4, 8, 8))
+
+        # estela
+        pen2 = QPen(QColor(glow))
+        pen2.setWidthF(2.2)
+        pen2.setCapStyle(Qt.RoundCap)
+        painter.setOpacity(0.85)
+        painter.setPen(pen2)
+        painter.drawArc(QRectF(-rx, -ry, rx * 2, ry * 2),
+                        int(math.degrees(rot) * 16), int(-70 * 16))
+        painter.setOpacity(1.0)
+
+        painter.restore()
+
+    def _paint_core(self, painter, cx, cy, glow, main):
+        # núcleo interior pulsante (el "cerebro")
+        pulse = self.pulse
+        r = 24 + 6 * pulse
+
+        grad = QRadialGradient(QPointF(cx - 4, cy - 4), r)
+        c0 = QColor(glow)
+        c0.setAlpha(230)
+        grad.setColorAt(0.0, c0)
+        c1 = QColor(main)
+        c1.setAlpha(180)
+        grad.setColorAt(0.7, c1)
+        c2 = QColor("#04101c")
+        grad.setColorAt(1.0, c2)
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(grad))
+        painter.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
+
+        # letra central según estado
+        letter = {"WAITING": "J", "LISTENING": "●",
+                  "PROCESSING": "···", "SPEAKING": "J"}[self.state]
+        f = QFont(Palette.MONO, 13, QFont.Bold)
+        painter.setFont(f)
+        painter.setPen(QColor(glow))
+        painter.drawText(
+            QRectF(cx - 40, cy - 40, 80, 80),
+            Qt.AlignCenter,
+            letter,
+        )
 
 
 # ============================================================
@@ -276,11 +506,11 @@ class JarvisWindow(QMainWindow):
 
         super().__init__()
 
-        self.setWindowTitle("J.A.R.V.I.S")
+        self.setWindowTitle("J.A.R.V.I.S — HOLOGRAPHIC INTERFACE")
 
-        self.resize(1050, 760)
+        self.resize(1180, 800)
 
-        self.setMinimumSize(850, 650)
+        self.setMinimumSize(900, 680)
 
         self.thread = None
         self.worker = None
@@ -308,438 +538,370 @@ class JarvisWindow(QMainWindow):
 
     def setup_ui(self):
 
-        central = QWidget()
+        self.setStyleSheet(self._global_stylesheet())
 
+        central = QWidget()
+        central.setObjectName("root")
+        central.setStyleSheet("QWidget#root { background-color: #04070c; }")
         self.setCentralWidget(central)
 
-        main_layout = QVBoxLayout(central)
+        outer = QHBoxLayout(central)
+        outer.setContentsMargins(18, 14, 18, 14)
+        outer.setSpacing(14)
 
-        main_layout.setContentsMargins(
-            35,
-            25,
-            35,
-            25
-        )
+        # ================================================
+        # PANEL IZQUIERDO — HUD TÉCNICO
+        # ================================================
+        left_panel = QFrame()
+        left_panel.setObjectName("hudPanel")
+        left_panel.setFixedWidth(190)
+        left_panel.setStyleSheet(self._panel_stylesheet())
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(14, 16, 14, 16)
+        left_layout.setSpacing(12)
 
-        main_layout.setSpacing(15)
+        left_layout.addLayout(self._make_panel_label("SISTEMA", "#39d6ff"))
 
-        # ----------------------------------------------------
-        # HEADER
-        # ----------------------------------------------------
+        sys_metrics = [
+            ("CEREBRO", "QWEN3 8B"),
+            ("VOZ", "WHISPER"),
+            ("TTS", "SYNTH"),
+            ("NÚCLEO", "LOCAL"),
+        ]
+        for k, v in sys_metrics:
+            left_layout.addLayout(self._metric_row(k, v))
 
-        header = QHBoxLayout()
+        left_layout.addSpacing(6)
+        left_layout.addLayout(self._make_panel_label("COMANDOS", "#4ef2a1"))
 
-        title = QLabel("J.A.R.V.I.S")
+        cmd_help = [
+            ("WAKE", "DI JARVIS"),
+            ("ESCUCHAR", "AUTOMÁTICO"),
+            ("TEXTO", "ESCRIBIR"),
+            ("MIC", "TOGGLE"),
+        ]
+        for k, v in cmd_help:
+            left_layout.addLayout(self._metric_row(k, v, color="#9aefca"))
 
-        title.setFont(
-            QFont("Segoe UI", 24, QFont.Bold)
-        )
+        left_layout.addStretch()
 
-        title.setStyleSheet("""
-            QLabel {
-                color: #e8f7ff;
-            }
-        """)
+        left_layout.addLayout(self._make_panel_label("ESTADO", "#ffc857"))
+        self.hud_state = QLabel("ESPERE")
+        self.hud_state.setFont(QFont(Palette.MONO, 9, QFont.Bold))
+        self.hud_state.setStyleSheet("color:#ffc857;")
+        left_layout.addWidget(self.hud_state)
 
-        subtitle = QLabel("LOCAL INTELLIGENT ASSISTANT")
+        outer.addWidget(left_panel)
 
-        subtitle.setFont(
-            QFont("Segoe UI", 9)
-        )
+        # ================================================
+        # COLUMNA CENTRAL — NÚCLEO + CHAT
+        # ================================================
+        center_col = QVBoxLayout()
+        center_col.setSpacing(12)
 
-        subtitle.setStyleSheet("""
-            QLabel {
-                color: #5d8190;
-                letter-spacing: 2px;
-            }
-        """)
+        # --- HEADER HOLOGRÁFICO ---
+        center_col.addLayout(self._build_header())
 
-        header_text = QVBoxLayout()
-
-        header_text.setSpacing(2)
-
-        header_text.addWidget(title)
-        header_text.addWidget(subtitle)
-
-        header.addLayout(header_text)
-
-        header.addStretch()
-
-        self.voice_status = QLabel("MICRÓFONO ACTIVO")
-
-        self.voice_status.setFont(
-            QFont("Segoe UI", 9, QFont.Bold)
-        )
-
-        self.voice_status.setStyleSheet("""
-            QLabel {
-                color: #55e6a5;
-                padding: 8px 14px;
-                border: 1px solid #245c49;
-                border-radius: 8px;
-                background-color: #0e1d18;
-            }
-        """)
-
-        header.addWidget(self.voice_status)
-
-        main_layout.addLayout(header)
-
-        # ----------------------------------------------------
-        # CORE
-        # ----------------------------------------------------
-
+        # --- NÚCLEO ---
         core_container = QVBoxLayout()
-
         core_container.setAlignment(Qt.AlignCenter)
+        self.core_widget = HoloCore()
+        core_container.addWidget(self.core_widget, alignment=Qt.AlignCenter)
 
-        self.core_widget = CoreWidget()
+        self.status_label = QLabel("SISTEMA EN ESPERA")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setFont(QFont(Palette.MONO, 12, QFont.Bold))
+        self.status_label.setStyleSheet("color:#39d6ff; letter-spacing:4px;")
+        core_container.addWidget(self.status_label)
 
-        core_container.addWidget(
-            self.core_widget,
-            alignment=Qt.AlignCenter
-        )
+        center_col.addLayout(core_container, stretch=1)
 
-        self.status_label = QLabel("ESPERANDO")
-
-        self.status_label.setAlignment(
-            Qt.AlignCenter
-        )
-
-        self.status_label.setFont(
-            QFont("Segoe UI", 11, QFont.Bold)
-        )
-
-        self.status_label.setStyleSheet("""
-            QLabel {
-                color: #6fdcff;
-                letter-spacing: 3px;
-            }
-        """)
-
-        core_container.addWidget(
-            self.status_label
-        )
-
-        main_layout.addLayout(core_container)
-
-        # ----------------------------------------------------
-        # CHAT
-        # ----------------------------------------------------
-
+        # --- CHAT ---
         self.chat = QTextEdit()
-
         self.chat.setReadOnly(True)
-
-        self.chat.setFont(
-            QFont("Segoe UI", 11)
-        )
-
+        self.chat.setFont(QFont(Palette.MONO, 10))
         self.chat.setPlaceholderText(
-            "La conversación aparecerá aquí..."
+            "[ TRANSMISIÓN DE DATOS — LA CONVERSACIÓN APARECERÁ AQUÍ ]"
         )
-
         self.chat.setStyleSheet("""
             QTextEdit {
-                background-color: #0b1117;
-                color: #d9e9ef;
-                border: 1px solid #1d303b;
-                border-radius: 14px;
-                padding: 16px;
-                selection-background-color: #1f5c73;
+                background-color: #070d14;
+                color: #c9e6f2;
+                border: 1px solid #12303d;
+                border-radius: 12px;
+                padding: 14px;
+                selection-background-color: #13516a;
             }
         """)
+        center_col.addWidget(self.chat, stretch=1)
 
-        main_layout.addWidget(
-            self.chat,
-            stretch=1
+        # --- INPUT ---
+        center_col.addWidget(self._build_input())
+
+        outer.addLayout(center_col, stretch=1)
+
+        # ================================================
+        # PANEL DERECHO — TELEMETRÍA
+        # ================================================
+        right_panel = QFrame()
+        right_panel.setObjectName("hudPanel")
+        right_panel.setFixedWidth(210)
+        right_panel.setStyleSheet(self._panel_stylesheet())
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(14, 16, 14, 16)
+        right_layout.setSpacing(12)
+
+        right_layout.addLayout(self._make_panel_label("TELEMETRÍA", "#b78cff"))
+
+        self.telemetry = QLabel()
+        self.telemetry.setFont(QFont(Palette.MONO, 9))
+        self.telemetry.setStyleSheet("color:#8fb8c9;")
+        self.telemetry.setText(
+            "POTENCIA  100%\n"
+            "NÚCLEO    ONLINE\n"
+            "RED       LOCAL\n"
+            "MODELO    QWEN3\n\n"
+            "· . . . . . . .\n"
+            "· J.A.R.V.I.S\n"
+            "· SISTEMAS OK"
         )
+        self.telemetry.setTextFormat(Qt.RichText)
+        right_layout.addWidget(self.telemetry)
 
-        # ----------------------------------------------------
-        # INPUT
-        # ----------------------------------------------------
+        right_layout.addSpacing(6)
+        right_layout.addLayout(self._make_panel_label("PROTOCOLO", "#39d6ff"))
 
-        input_container = QFrame()
-
-        input_container.setStyleSheet("""
-            QFrame {
-                background-color: #0b1117;
-                border: 1px solid #1d303b;
-                border-radius: 14px;
-            }
-        """)
-
-        input_layout = QHBoxLayout(
-            input_container
+        self.protocol = QLabel(
+            "▸ WAKEWORD CARGADO\n"
+            "▸ AUDIO: OK\n"
+            "▸ TTS: INICIALIZADO\n"
+            "▸ CEREBRO: LISTO"
         )
+        self.protocol.setFont(QFont(Palette.MONO, 9))
+        self.protocol.setStyleSheet("color:#4e7a8a;")
+        right_layout.addWidget(self.protocol)
 
-        input_layout.setContentsMargins(
-            10,
-            8,
-            10,
-            8
-        )
+        right_layout.addStretch()
 
-        input_layout.setSpacing(8)
+        right_layout.addLayout(self._make_panel_label("MICRÓFONO", "#4ef2a1"))
+        self.voice_status = QLabel("● ACTIVO")
+        self.voice_status.setFont(QFont(Palette.MONO, 9, QFont.Bold))
+        self.voice_status.setStyleSheet("color:#4ef2a1;")
+        right_layout.addWidget(self.voice_status)
 
-        self.input_box = QLineEdit()
+        self.mic_button = QPushButton("MIC ON")
+        self.mic_button.clicked.connect(self.toggle_voice)
+        self.mic_button.setStyleSheet(self._button_stylesheet("#4ef2a1", "#0d241b"))
+        right_layout.addWidget(self.mic_button)
 
-        self.input_box.setPlaceholderText(
-            "Escribe un mensaje para J.A.R.V.I.S..."
-        )
-
-        self.input_box.setFont(
-            QFont("Segoe UI", 11)
-        )
-
-        self.input_box.setStyleSheet("""
-            QLineEdit {
-                background-color: transparent;
-                color: #e8f7ff;
-                border: none;
-                padding: 10px;
-            }
-
-            QLineEdit:focus {
-                border: none;
-            }
-        """)
-
-        self.input_box.returnPressed.connect(
-            self.send_message
-        )
-
-        input_layout.addWidget(
-            self.input_box,
-            stretch=1
-        )
-
-        self.mic_button = QPushButton("MIC")
-
-        self.mic_button.setFixedSize(
-            70,
-            42
-        )
-
-        self.mic_button.clicked.connect(
-            self.toggle_voice
-        )
-
-        self.mic_button.setStyleSheet("""
-            QPushButton {
-                background-color: #10202a;
-                color: #6fdcff;
-                border: 1px solid #2b6c82;
-                border-radius: 8px;
-                font-weight: bold;
-            }
-
-            QPushButton:hover {
-                background-color: #16313e;
-            }
-
-            QPushButton:pressed {
-                background-color: #1c4352;
-            }
-        """)
-
-        input_layout.addWidget(
-            self.mic_button
-        )
-
-        self.send_button = QPushButton("ENVIAR")
-
-        self.send_button.setFixedSize(
-            85,
-            42
-        )
-
-        self.send_button.clicked.connect(
-            self.send_message
-        )
-
-        self.send_button.setStyleSheet("""
-            QPushButton {
-                background-color: #123447;
-                color: #7edfff;
-                border: 1px solid #2f7895;
-                border-radius: 8px;
-                font-weight: bold;
-            }
-
-            QPushButton:hover {
-                background-color: #17465d;
-            }
-
-            QPushButton:pressed {
-                background-color: #1d566f;
-            }
-        """)
-
-        input_layout.addWidget(
-            self.send_button
-        )
-
-        main_layout.addWidget(
-            input_container
-        )
-
-        # ----------------------------------------------------
-        # FOOTER
-        # ----------------------------------------------------
-
-        footer = QHBoxLayout()
-
-        self.engine_label = QLabel(
-            "QWEN3 8B  •  WHISPER  •  LOCAL"
-        )
-
-        self.engine_label.setFont(
-            QFont("Segoe UI", 8)
-        )
-
-        self.engine_label.setStyleSheet("""
-            QLabel {
-                color: #45606b;
-            }
-        """)
-
-        footer.addWidget(
-            self.engine_label
-        )
-
-        footer.addStretch()
-
-        self.footer_status = QLabel(
-            "SISTEMA OPERATIVO"
-        )
-
-        self.footer_status.setFont(
-            QFont("Segoe UI", 8)
-        )
-
-        self.footer_status.setStyleSheet("""
-            QLabel {
-                color: #55e6a5;
-            }
-        """)
-
-        footer.addWidget(
-            self.footer_status
-        )
-
-        main_layout.addLayout(footer)
-
-        # ----------------------------------------------------
-        # ESTILO GLOBAL
-        # ----------------------------------------------------
-
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #060b10;
-            }
-
-            QWidget {
-                background-color: #060b10;
-            }
-
-            QScrollBar:vertical {
-                background: #080f15;
-                width: 8px;
-                margin: 2px;
-            }
-
-            QScrollBar::handle:vertical {
-                background: #24404d;
-                border-radius: 4px;
-            }
-
-            QScrollBar::handle:vertical:hover {
-                background: #326477;
-            }
-
-            QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-        """)
+        outer.addWidget(right_panel)
 
         self.append_system_message(
             "J.A.R.V.I.S iniciado. Sistemas locales preparados."
         )
+
+    # --------------------------------------------------------
+    # CONSTRUCTORES DE UI
+    # --------------------------------------------------------
+
+    def _make_panel_label(self, text, color):
+        lay = QHBoxLayout()
+        bar = QFrame()
+        bar.setFixedSize(12, 2)
+        bar.setStyleSheet(f"background-color:{color}; border:none;")
+        lab = QLabel(text)
+        lab.setFont(QFont(Palette.MONO, 9, QFont.Bold))
+        lab.setStyleSheet(f"color:{color}; letter-spacing:2px;")
+        lay.addWidget(bar)
+        lay.addWidget(lab)
+        lay.addStretch()
+        return lay
+
+    def _metric_row(self, key, value, color="#8fb8c9"):
+        row = QHBoxLayout()
+        k = QLabel(key)
+        k.setFont(QFont(Palette.MONO, 8))
+        k.setStyleSheet("color:#4e7a8a;")
+        v = QLabel(value)
+        v.setFont(QFont(Palette.MONO, 8, QFont.Bold))
+        v.setStyleSheet(f"color:{color};")
+        row.addWidget(k)
+        row.addStretch()
+        row.addWidget(v)
+        return row
+
+    def _build_header(self):
+        header = QHBoxLayout()
+        header.setSpacing(12)
+
+        left_block = QVBoxLayout()
+        left_block.setSpacing(1)
+
+        title = QLabel("J.A.R.V.I.S")
+        title.setFont(QFont(Palette.MONO, 22, QFont.Bold))
+        title.setStyleSheet("color:#d8f4ff; letter-spacing:6px;")
+
+        sub = QLabel("JUST A RATHER VERY INTELLIGENT SYSTEM")
+        sub.setFont(QFont(Palette.MONO, 8))
+        sub.setStyleSheet("color:#4e7a8a; letter-spacing:2px;")
+
+        left_block.addWidget(title)
+        left_block.addWidget(sub)
+        header.addLayout(left_block)
+
+        header.addStretch()
+
+        header.addWidget(self._hud_chip("LOCAL", "#39d6ff"))
+        header.addWidget(self._hud_chip("HOLOGRAFICO", "#4ef2a1"))
+        header.addWidget(self._hud_chip("ONLINE", "#ffc857"))
+
+        return header
+
+    def _hud_chip(self, text, color):
+        chip = QLabel(text)
+        chip.setFont(QFont(Palette.MONO, 8, QFont.Bold))
+        chip.setStyleSheet(
+            f"color:{color}; border:1px solid {color};"
+            f"border-radius:6px; padding:4px 8px; background-color:#0a141c;"
+        )
+        return chip
+
+    def _build_input(self):
+        container = QFrame()
+        container.setStyleSheet("""
+            QFrame {
+                background-color: #070d14;
+                border: 1px solid #12303d;
+                border-radius: 12px;
+            }
+        """)
+
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+
+        self.input_box = QLineEdit()
+        self.input_box.setPlaceholderText(
+            "escribe un mensaje para J.A.R.V.I.S >_"
+        )
+        self.input_box.setFont(QFont(Palette.MONO, 10))
+        self.input_box.setStyleSheet("""
+            QLineEdit {
+                background-color: transparent;
+                color: #d8f4ff;
+                border: none;
+                padding: 10px;
+            }
+            QLineEdit:focus { border: none; }
+        """)
+        self.input_box.returnPressed.connect(self.send_message)
+        layout.addWidget(self.input_box, stretch=1)
+
+        self.send_button = QPushButton("ENVIAR")
+        self.send_button.setFixedSize(90, 42)
+        self.send_button.clicked.connect(self.send_message)
+        self.send_button.setStyleSheet(
+            self._button_stylesheet("#39d6ff", "#0d2130")
+        )
+        layout.addWidget(self.send_button)
+
+        return container
+
+    def _button_stylesheet(self, color, bg):
+        return f"""
+            QPushButton {{
+                background-color: {bg};
+                color: {color};
+                border: 1px solid {color};
+                border-radius: 8px;
+                font-family: {Palette.MONO};
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {color}26;
+            }}
+            QPushButton:pressed {{
+                background-color: {color}40;
+            }}
+            QPushButton:disabled {{
+                color: #2c4a57;
+                border-color: #12303d;
+                background-color: #0a1018;
+            }}
+        """
+
+    def _panel_stylesheet(self):
+        return """
+            QFrame#hudPanel {
+                background-color: #080e15;
+                border: 1px solid #102b36;
+                border-radius: 12px;
+            }
+        """
+
+    def _global_stylesheet(self):
+        return """
+            QMainWindow { background-color: #04070c; }
+            QWidget { background-color: #04070c; }
+
+            QScrollBar:vertical {
+                background: #080f15; width: 8px; margin: 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: #1c4c5e; border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #2a6a82;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical { height: 0px; }
+        """
 
     # ========================================================
     # MENSAJES
     # ========================================================
 
     def append_user_message(self, text):
-
         self.chat.append(
             f"""
-            <div style="
-                margin-top:12px;
-                margin-bottom:4px;
-                color:#6fdcff;
-                font-weight:bold;
-            ">
-                TÚ
+            <div style="margin-top:12px; margin-bottom:4px;
+                 color:#39d6ff; font-weight:bold;">
+                ▶ TÚ
             </div>
-
-            <div style="
-                color:#d9e9ef;
-                margin-bottom:10px;
-            ">
+            <div style="color:#d8f4ff; margin-bottom:10px;">
                 {self.escape_html(text)}
             </div>
             """
         )
-
         self.scroll_chat()
 
     def append_jarvis_message(self, text):
-
         self.chat.append(
             f"""
-            <div style="
-                margin-top:12px;
-                margin-bottom:4px;
-                color:#b78cff;
-                font-weight:bold;
-            ">
-                J.A.R.V.I.S
+            <div style="margin-top:12px; margin-bottom:4px;
+                 color:#b78cff; font-weight:bold;">
+                ◈ J.A.R.V.I.S
             </div>
-
-            <div style="
-                color:#e3edf2;
-                margin-bottom:10px;
-            ">
+            <div style="color:#e3edf2; margin-bottom:10px;">
                 {self.escape_html(text)}
             </div>
             """
         )
-
         self.scroll_chat()
 
     def append_system_message(self, text):
-
         self.chat.append(
             f"""
-            <div style="
-                margin-top:8px;
-                margin-bottom:8px;
-                color:#45606b;
-                font-size:9pt;
-            ">
-                {self.escape_html(text)}
+            <div style="margin-top:8px; margin-bottom:8px;
+                 color:#4e7a8a; font-size:9pt;">
+                [ SYS ] {self.escape_html(text)}
             </div>
             """
         )
-
         self.scroll_chat()
 
     @staticmethod
     def escape_html(text):
-
         return (
             text
             .replace("&", "&amp;")
@@ -749,12 +911,8 @@ class JarvisWindow(QMainWindow):
         )
 
     def scroll_chat(self):
-
         scrollbar = self.chat.verticalScrollBar()
-
-        scrollbar.setValue(
-            scrollbar.maximum()
-        )
+        scrollbar.setValue(scrollbar.maximum())
 
     # ========================================================
     # ESTADOS
@@ -763,43 +921,21 @@ class JarvisWindow(QMainWindow):
     def set_state(self, state):
 
         states = {
-
-            "WAITING": (
-                "ESPERANDO",
-                "#6fdcff"
-            ),
-
-            "LISTENING": (
-                "ESCUCHANDO",
-                "#55e6a5"
-            ),
-
-            "PROCESSING": (
-                "PROCESANDO",
-                "#ffd166"
-            ),
-
-            "SPEAKING": (
-                "HABLANDO",
-                "#b78cff"
-            ),
+            "WAITING":   ("SISTEMA EN ESPERA", "#39d6ff", "ESPERE"),
+            "LISTENING": ("ESCUCHANDO",        "#4ef2a1", "MIC ACTIVO"),
+            "PROCESSING":("PROCESANDO",        "#ffc857", "CEREBRO"),
+            "SPEAKING":  ("HABLANDO",          "#b78cff", "VOZ"),
         }
 
-        text, color = states.get(
-            state,
-            states["WAITING"]
-        )
+        text, color, hud = states.get(state, states["WAITING"])
 
         self.status_label.setText(text)
-
         self.status_label.setStyleSheet(
-            f"""
-            QLabel {{
-                color: {color};
-                letter-spacing: 3px;
-            }}
-            """
+            f"color:{color}; letter-spacing:4px;"
         )
+
+        self.hud_state.setText(hud)
+        self.hud_state.setStyleSheet(f"color:{color};")
 
         self.core_widget.set_state(state)
 
@@ -814,17 +950,11 @@ class JarvisWindow(QMainWindow):
         if not message:
             return
 
-        # Solo bloqueamos mientras Qwen está procesando.
-        #
-        # Durante el TTS self.processing será False,
-        # por lo que el usuario puede escribir.
         if self.processing:
             return
 
         self.input_box.clear()
-
         self.append_user_message(message)
-
         self.start_processing(message)
 
     # ========================================================
@@ -837,14 +967,11 @@ class JarvisWindow(QMainWindow):
             return
 
         self.processing = True
-
         self.set_state("PROCESSING")
-
         self.send_button.setEnabled(False)
 
         thread = QThread()
         worker = JarvisWorker(message)
-
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
@@ -857,63 +984,35 @@ class JarvisWindow(QMainWindow):
 
         thread.finished.connect(worker.deleteLater)
 
-        # Guardamos la referencia hasta que termine.
         self.active_threads.append(thread)
 
         def cleanup():
             if thread in self.active_threads:
                 self.active_threads.remove(thread)
-
             thread.deleteLater()
 
         thread.finished.connect(cleanup)
-
         thread.start()
 
     @Slot(str)
-    @Slot(str)
     def on_response(self, answer):
-
-        # Qwen ya ha terminado.
-        # Por tanto, podemos escribir otro mensaje
-        # mientras JARVIS está hablando.
 
         self.processing = False
         self.send_button.setEnabled(True)
 
         if answer:
-
             self.append_jarvis_message(answer)
-
             self.set_state("SPEAKING")
-
             self.start_tts(answer)
-
         else:
-
             self.finish_processing()
 
     @Slot(str)
     def on_error(self, error):
 
         self.processing = False
-
         self.send_button.setEnabled(True)
-
-        self.append_system_message(
-            f"Error: {error}"
-        )
-
-        self.footer_status.setText(
-            "ERROR"
-        )
-
-        self.footer_status.setStyleSheet("""
-            QLabel {
-                color: #ff6b6b;
-            }
-        """)
-
+        self.append_system_message(f"Error: {error}")
         self.finish_processing()
 
     # ========================================================
@@ -924,7 +1023,6 @@ class JarvisWindow(QMainWindow):
 
         thread = QThread()
         worker = TTSWorker(text)
-
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
@@ -942,33 +1040,22 @@ class JarvisWindow(QMainWindow):
         def cleanup():
             if thread in self.active_tts_threads:
                 self.active_tts_threads.remove(thread)
-
             thread.deleteLater()
 
         thread.finished.connect(cleanup)
-
         thread.start()
 
     @Slot()
     def on_tts_finished(self):
-
         self.finish_processing()
-
         if self.tts_thread is not None:
-
             self.tts_thread.quit()
 
     @Slot(str)
     def on_tts_error(self, error):
-
-        self.append_system_message(
-            f"Error de voz: {error}"
-        )
-
+        self.append_system_message(f"Error de voz: {error}")
         if self.tts_thread is not None:
-
             self.tts_thread.quit()
-
         self.finish_processing()
 
     # ========================================================
@@ -976,22 +1063,9 @@ class JarvisWindow(QMainWindow):
     # ========================================================
 
     def finish_processing(self):
-
         self.processing = False
-
         self.send_button.setEnabled(True)
-
         self.set_state("WAITING")
-
-        self.footer_status.setText(
-            "SISTEMA OPERATIVO"
-        )
-
-        self.footer_status.setStyleSheet("""
-            QLabel {
-                color: #55e6a5;
-            }
-        """)
 
     # ========================================================
     # VOZ
@@ -1000,67 +1074,29 @@ class JarvisWindow(QMainWindow):
     def start_voice(self):
 
         if self.voice_thread is not None:
-
             if self.voice_thread.isRunning():
                 return
 
         self.voice_enabled = True
-
-        self.voice_status.setText(
-            "MICRÓFONO ACTIVO"
-        )
-
-        self.voice_status.setStyleSheet("""
-            QLabel {
-                color: #55e6a5;
-                padding: 8px 14px;
-                border: 1px solid #245c49;
-                border-radius: 8px;
-                background-color: #0e1d18;
-            }
-        """)
-
+        self.voice_status.setText("● ACTIVO")
+        self.voice_status.setStyleSheet("color:#4ef2a1;")
         self.mic_button.setText("MIC ON")
+        self.mic_button.setStyleSheet(self._button_stylesheet("#4ef2a1", "#0d241b"))
 
         self.voice_thread = QThread()
-
         self.voice_worker = VoiceWorker()
+        self.voice_worker.moveToThread(self.voice_thread)
 
-        self.voice_worker.moveToThread(
-            self.voice_thread
-        )
+        self.voice_thread.started.connect(self.voice_worker.run)
 
-        self.voice_thread.started.connect(
-            self.voice_worker.run
-        )
+        self.voice_worker.wake_detected.connect(self.on_wake_detected)
+        self.voice_worker.listening_started.connect(self.on_listening_started)
+        self.voice_worker.command_detected.connect(self.on_voice_command)
+        self.voice_worker.processing_started.connect(self.on_voice_processing)
+        self.voice_worker.error.connect(self.on_voice_error)
 
-        self.voice_worker.wake_detected.connect(
-            self.on_wake_detected
-        )
-
-        self.voice_worker.listening_started.connect(
-            self.on_listening_started
-        )
-
-        self.voice_worker.command_detected.connect(
-            self.on_voice_command
-        )
-
-        self.voice_worker.processing_started.connect(
-            self.on_voice_processing
-        )
-
-        self.voice_worker.error.connect(
-            self.on_voice_error
-        )
-
-        self.voice_thread.finished.connect(
-            self.voice_worker.deleteLater
-        )
-
-        self.voice_thread.finished.connect(
-            self.voice_thread.deleteLater
-        )
+        self.voice_thread.finished.connect(self.voice_worker.deleteLater)
+        self.voice_thread.finished.connect(self.voice_thread.deleteLater)
 
         self.voice_thread.start()
 
@@ -1069,35 +1105,20 @@ class JarvisWindow(QMainWindow):
         self.voice_enabled = False
 
         if self.voice_worker is not None:
-
             self.voice_worker.stop()
 
         if self.voice_thread is not None:
-
             if self.voice_thread.isRunning():
-
                 self.voice_thread.quit()
-
                 self.voice_thread.wait(2000)
 
         self.voice_worker = None
         self.voice_thread = None
 
-        self.voice_status.setText(
-            "MICRÓFONO DESACTIVADO"
-        )
-
-        self.voice_status.setStyleSheet("""
-            QLabel {
-                color: #697c84;
-                padding: 8px 14px;
-                border: 1px solid #29383e;
-                border-radius: 8px;
-                background-color: #0b1115;
-            }
-        """)
-
+        self.voice_status.setText("○ INACTIVO")
+        self.voice_status.setStyleSheet("color:#2c4a57;")
         self.mic_button.setText("MIC OFF")
+        self.mic_button.setStyleSheet(self._button_stylesheet("#2c4a57", "#0a1018"))
 
     # ========================================================
     # EVENTOS DE VOZ
@@ -1105,56 +1126,35 @@ class JarvisWindow(QMainWindow):
 
     @Slot(float)
     def on_wake_detected(self, score):
-
         self.set_state("LISTENING")
-
-        self.footer_status.setText(
-            "PALABRA CLAVE DETECTADA"
-        )
 
     @Slot()
     def on_listening_started(self):
-
         self.set_state("LISTENING")
-
-        self.footer_status.setText(
-            "ESCUCHANDO MICRÓFONO"
-        )
 
     @Slot(str)
     def on_voice_command(self, command):
-
         if not command:
             return
-
         self.append_user_message(command)
-
         self.start_processing(command)
 
     @Slot()
     def on_voice_processing(self):
-
         self.set_state("PROCESSING")
 
     @Slot(str)
     def on_voice_error(self, error):
-
-        self.append_system_message(
-            f"Error de micrófono: {error}"
-        )
+        self.append_system_message(f"Error de micrófono: {error}")
 
     # ========================================================
     # BOTÓN MICRÓFONO
     # ========================================================
 
     def toggle_voice(self):
-
         if self.voice_enabled:
-
             self.stop_voice()
-
         else:
-
             self.start_voice()
 
     # ========================================================
@@ -1163,23 +1163,18 @@ class JarvisWindow(QMainWindow):
 
     def closeEvent(self, event):
 
-        # Detener micrófono
         self.stop_voice()
-    
-        # Esperar a los workers de Qwen
+
         for thread in self.active_threads:
-        
             if thread.isRunning():
                 thread.quit()
                 thread.wait(2000)
-    
-        # Esperar a los workers de TTS
+
         for thread in self.active_tts_threads:
-        
             if thread.isRunning():
                 thread.quit()
                 thread.wait(2000)
-    
+
         event.accept()
 
 
@@ -1190,18 +1185,12 @@ class JarvisWindow(QMainWindow):
 def main():
 
     app = QApplication(sys.argv)
-
-    app.setApplicationName(
-        "J.A.R.V.I.S"
-    )
+    app.setApplicationName("J.A.R.V.I.S")
 
     window = JarvisWindow()
-
     window.show()
 
-    sys.exit(
-        app.exec()
-    )
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

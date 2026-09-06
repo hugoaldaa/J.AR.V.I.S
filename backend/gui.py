@@ -467,7 +467,7 @@ class HoloCore(QWidget):
     def _paint_core(self, painter, cx, cy, glow, main):
         # núcleo interior pulsante (el "cerebro")
         pulse = self.pulse
-        r = 24 + 6 * pulse
+        r = 35 + 8 * pulse
 
         grad = QRadialGradient(QPointF(cx - 4, cy - 4), r)
         c0 = QColor(glow)
@@ -483,17 +483,48 @@ class HoloCore(QWidget):
         painter.setBrush(QBrush(grad))
         painter.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
 
-        # letra central según estado
-        letter = {"WAITING": "J", "LISTENING": "●",
-                  "PROCESSING": "···", "SPEAKING": "J"}[self.state]
-        f = QFont(Palette.MONO, 13, QFont.Bold)
+        # J.A.R.V.I.S en horizontal, grande, centrado
+        name = "J.A.R.V.I.S"
+        f = QFont(Palette.MONO, 19, QFont.Bold)
         painter.setFont(f)
+        fm = painter.fontMetrics()
+        total_w = fm.horizontalAdvance(name)
+        total_h = fm.height()
+
+        painter.setPen(QColor(glow))
+
+        # resplandor suave para la legibilidad
+        painter.setOpacity(0.35)
+        glow_col = QColor(main)
+        painter.setPen(glow_col)
+        painter.drawText(
+            QRectF(cx - total_w / 2.0 - 1, cy - total_h / 2.0 - 1,
+                   total_w + 2, total_h + 2),
+            Qt.AlignCenter,
+            name,
+        )
+        painter.setOpacity(1.0)
+
         painter.setPen(QColor(glow))
         painter.drawText(
-            QRectF(cx - 40, cy - 40, 80, 80),
+            QRectF(cx - total_w / 2.0, cy - total_h / 2.0,
+                   total_w, total_h),
             Qt.AlignCenter,
-            letter,
+            name,
         )
+
+        # indicador de estado bajo las siglas
+        marker = {"WAITING": "□", "LISTENING": "◉",
+                  "PROCESSING": "•••", "SPEAKING": "◄►"}[self.state]
+        mf = QFont(Palette.MONO, 8, QFont.Bold)
+        painter.setFont(mf)
+        painter.setOpacity(0.9)
+        painter.drawText(
+            QRectF(cx - 60, cy + total_h / 2.0 + 4, 120, 14),
+            Qt.AlignCenter,
+            marker,
+        )
+        painter.setOpacity(1.0)
 
 
 # ============================================================

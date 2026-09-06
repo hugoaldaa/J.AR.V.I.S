@@ -1,4 +1,5 @@
 import re
+import json
 import requests
 
 from obsidian import search_vault
@@ -39,6 +40,10 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "qwen3:8b"
 
 SESSION_ID = "default"
+
+# Mantener el modelo cargado en memoria 12 horas para
+# evitar recargas de ~25s entre mensajes.
+KEEP_ALIVE = "12h"
 
 
 # ============================================================
@@ -414,6 +419,170 @@ def handle_direct_command(message: str):
 # JARVIS
 # ============================================================
 
+def write_messages(message: str) -> list:
+    """
+    Construye el contexto completo: personalidad + memoria
+    de Obsidian + historial + mensaje nuevo.
+    """
+
+    memory = get_memory(message)
+    history = get_chat_history()
+
+    messages = [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT
+        }
+    ]
+
+    if memory:
+
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "MEMORIA PERMANENTE DE OBSIDIAN\n\n"
+                    + memory
+                )
+            }
+        )
+
+    for role, content, created_at in history:
+
+        if role in ["user", "assistant"]:
+
+            # No añadimos respuestas vacías
+            if content.strip():
+
+                messages.append(
+                    {
+                        "role": role,
+                        "content": content
+                    }
+                )
+
+    messages.append(
+        {
+            "role": "user",
+            "content": message
+        }
+    )
+
+    return messages
+
+
+def send_payload(messages: list, stream: bool = False):
+    """
+    Envia la petición a Ollama.
+
+    Devuelve la respuesta completa parseada (stream=False)
+    o un generador de líneas JSON (stream=True).
+
+    Ante un error de conexión entrega el mensaje de error
+    como un string.
+    """
+
+    payload = {
+        "model": MODEL,
+        "messages": messages,
+        "tools": TOOLS,
+        "stream": stream,
+        "think": False,
+        "keep_alive": KEEP_ALIVE,
+    }
+
+    try:
+
+        response = requests.post(
+            OLLAMA_URL,
+            json=payload,
+            stream=stream,
+            timeout=120
+        )
+
+        response.raise_for_status()
+
+    except requests.exceptions.ConnectionError:
+
+        yield (
+            "No puedo conectarme con Ollama. "
+            "Comprueba que Ollama está iniciado."
+        )
+
+        return
+
+    except requests.exceptions.Timeout:
+
+        yield (
+            "Ollama está tardando demasiado en responder."
+        )
+
+        return
+
+    except Exception as e:
+
+        yield f"Ha ocurrido un error: {e}"
+
+        return
+
+    if stream:
+
+        for line in response.iter_lines():
+
+            if not line:
+                continue
+
+            try:
+
+                yield json.loads(
+                    line.decode("utf-8")
+                )
+
+            except Exception:
+
+                continue
+
+        response.close()
+
+    else:
+
+        yield response.json()
+
+
+# ============================================================
+# CALENTAR MODELO (arranque)
+# ============================================================
+
+def warmup():
+    """
+    Petición mínima en segundo plano para que Ollama cargue
+    el modelo en memoria. Evita los ~25s de arranque en frío
+    en el primer mensaje.
+    """
+
+    try:
+
+        list(
+            send_payload(
+                [
+                    {
+                        "role": "user",
+                        "content": "ok"
+                    }
+                ],
+                stream=False
+            )
+        )
+
+    except Exception:
+
+        pass
+
+
+# ============================================================
+# JARVIS (respuesta completa)
+# ============================================================
+
 def ask_jarvis(message: str) -> str:
 
     # ========================================================
@@ -434,72 +603,10 @@ def ask_jarvis(message: str) -> str:
         return direct_result
 
     # ========================================================
-    # MEMORIA
-    # ========================================================
-
-    memory = get_memory(message)
-
-    # ========================================================
-    # HISTORIAL
-    # ========================================================
-
-    history = get_chat_history()
-
-    # ========================================================
     # MENSAJES
     # ========================================================
 
-    messages = [
-        {
-            "role": "system",
-            "content": SYSTEM_PROMPT
-        }
-    ]
-
-    # ========================================================
-    # MEMORIA
-    # ========================================================
-
-    if memory:
-
-        messages.append(
-            {
-                "role": "system",
-                "content": (
-                    "MEMORIA PERMANENTE DE OBSIDIAN\n\n"
-                    + memory
-                )
-            }
-        )
-
-    # ========================================================
-    # HISTORIAL
-    # ========================================================
-
-    for role, content, created_at in history:
-
-        if role in ["user", "assistant"]:
-
-            # No añadimos respuestas vacías
-            if content.strip():
-
-                messages.append(
-                    {
-                        "role": role,
-                        "content": content
-                    }
-                )
-
-    # ========================================================
-    # NUEVO MENSAJE
-    # ========================================================
-
-    messages.append(
-        {
-            "role": "user",
-            "content": message
-        }
-    )
+    messages = write_messages(message)
 
     # ========================================================
     # AGENT LOOP
@@ -507,46 +614,21 @@ def ask_jarvis(message: str) -> str:
 
     while True:
 
-        payload = {
-            "model": MODEL,
-            "messages": messages,
-            "tools": TOOLS,
-            "stream": False,
-            "think": False,
-        }
+        data = None
 
-        # ====================================================
-        # PETICIÓN A OLLAMA
-        # ====================================================
+        for item in send_payload(messages, stream=False):
 
-        try:
+            # send_payload puede devolver un string de error
+            if isinstance(item, str):
+                return item
 
-            response = requests.post(
-                OLLAMA_URL,
-                json=payload,
-                timeout=120
-            )
+            data = item
+            break
 
-            response.raise_for_status()
-
-            data = response.json()
-
-        except requests.exceptions.ConnectionError:
-
+        if data is None:
             return (
-                "No puedo conectarme con Ollama. "
-                "Comprueba que Ollama está iniciado."
+                "No he recibido respuesta de Ollama."
             )
-
-        except requests.exceptions.Timeout:
-
-            return (
-                "Ollama está tardando demasiado en responder."
-            )
-
-        except Exception as e:
-
-            return f"Ha ocurrido un error: {e}"
 
         # ====================================================
         # RESPUESTA DEL ASISTENTE
@@ -660,6 +742,169 @@ def ask_jarvis(message: str) -> str:
             # ------------------------------------------------
             # TOOL NORMAL
             # ------------------------------------------------
+
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_name": tool_name,
+                    "content": result,
+                }
+            )
+
+
+# ============================================================
+# JARVIS STREAMING (tokens progresivos)
+# ============================================================
+
+def ask_jarvis_stream(message: str):
+    """
+    Como ask_jarvis pero va devolviendo (yield) los trozos
+    de texto según el modelo los genera, para mostrarlos
+    en tiempo real en la interfaz.
+    """
+
+    # ========================================================
+    # COMANDOS DIRECTOS
+    # ========================================================
+
+    direct_result = handle_direct_command(message)
+
+    if direct_result is not None:
+
+        save_message(
+            SESSION_ID,
+            "user",
+            message
+        )
+
+        yield direct_result
+
+        return
+
+    # ========================================================
+    # MENSAJES
+    # ========================================================
+
+    messages = write_messages(message)
+
+    # ========================================================
+    # AGENT LOOP
+    # ========================================================
+
+    while True:
+
+        content_parts = []
+
+        for item in send_payload(messages, stream=True):
+
+            if isinstance(item, str):
+                # error de conexión / timeout
+                yield item
+                return
+
+            message_chunk = item.get(
+                "message",
+                {}
+            )
+
+            piece = message_chunk.get("content")
+
+            if piece:
+                content_parts.append(piece)
+                yield piece
+
+            if item.get("done"):
+                assistant_message = message_chunk
+                break
+
+        else:
+            # el generador terminó sin done
+            yield (
+                "No he recibido respuesta de Ollama."
+            )
+            return
+
+        messages.append(
+            assistant_message
+        )
+
+        tool_calls = assistant_message.get(
+            "tool_calls",
+            []
+        )
+
+        if not tool_calls:
+
+            answer = "".join(
+                content_parts
+            ).strip()
+
+            # Eliminar emojis aunque Qwen los genere
+            answer = remove_emojis(answer)
+
+            save_message(
+                SESSION_ID,
+                "user",
+                message
+            )
+
+            save_message(
+                SESSION_ID,
+                "assistant",
+                answer
+            )
+
+            return
+
+        for tool_call in tool_calls:
+
+            function_data = (
+                tool_call
+                .get("function", {})
+            )
+
+            tool_name = function_data.get(
+                "name"
+            )
+
+            arguments = function_data.get(
+                "arguments",
+                {}
+            )
+
+            print(
+                f"Herramienta: {tool_name}"
+            )
+
+            print(
+                f"Argumentos: {arguments}"
+            )
+
+            result = execute_tool(
+                tool_name,
+                arguments
+            )
+
+            print(
+                f"Resultado: {result}"
+            )
+
+            if tool_name in [
+                "open_program",
+                "open_folder",
+                "open_website"
+            ]:
+
+                if result == "OK":
+
+                    save_message(
+                        SESSION_ID,
+                        "user",
+                        message
+                    )
+
+                    # No se genera ninguna respuesta.
+                    return ""
 
             messages.append(
                 {

@@ -8,6 +8,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from brain import ask_jarvis
 from tts import speak
+from database import init_database
 
 from voice import (
     wait_for_wake_word,
@@ -119,6 +120,9 @@ def process_command(command, source):
     
         jarvis_speak(answer)
     
+        # Esperar a que termine de sonar antes de seguir
+        time.sleep(0.5)
+
         print()
 
 
@@ -250,6 +254,9 @@ def voice_loop():
                 "¿Qué quieres?"
             )
 
+            # Esperar a que termine de sonar antes de escuchar
+            time.sleep(0.5)
+
 
             if STOP_EVENT.is_set():
                 break
@@ -336,6 +343,9 @@ def main():
 
     print("Sistema iniciado.")
     print()
+
+    # Inicializar base de datos
+    init_database()
 
 
     # --------------------------------------------------------

@@ -2,12 +2,24 @@ import re
 import json
 import requests
 
-from obsidian import search_vault
-from database import save_message, get_conversation
+from obsidian import (
+    search_vault,
+    infer_category,
+    load_memory_config,
+    upsert_memory_entry,
+    save_memory_entry,
+)
+from database import (
+    save_message,
+    get_conversation,
+)
 
 from system_tools import (
     AVAILABLE_FUNCTIONS,
     open_program,
+    save_memory,
+    update_memory,
+    delete_memory,
 )
 
 
@@ -83,6 +95,8 @@ Utiliza estos datos cuando sean relevantes.
 
 REGLAS:
 - No inventes datos personales.
+- SI NUNCA te han dicho el nombre del usuario, NUNCA lo inventes.
+- Si el usuario pregunta por su nombre y no lo tienes guardado, di que no lo sabes.
 - Si no recuerdas algo, dilo claramente.
 - Si un dato aparece en el historial, puedes utilizarlo.
 - Si un dato aparece en Obsidian, puedes utilizarlo.
@@ -123,6 +137,52 @@ ACCIONES:
 - No digas "Ya está".
 - No preguntes si el usuario necesita algo más.
 - Las órdenes de apertura deben ejecutarse de forma silenciosa.
+
+MEMORIA PERMANENTE:
+Tienes herramientas para GUARDAR, ACTUALIZAR y BORRAR memoria.
+Úsalas para recordar datos importantes del usuario a largo plazo.
+
+CUÁNDO GUARDAR (sin preguntar):
+- Cuando el usuario te dice un dato personal nuevo
+  (su nombre, dónde vive, su profesión, su email...).
+  - Usa save_memory con category "Datos Personales".
+- Cuando te cuenta una preferencia ("me gusta X",
+  "prefiero X", "mi favorito es X").
+  - Usa save_memory con category "Preferencias".
+- Cuando te cuenta un plan o tarea futura.
+  - Usa save_memory con category "Planes y Tareas".
+- Cuando te cuente una iniciativa o proyecto propio.
+  - Usa save_memory con category "Proyectos".
+
+CÓMO GUARDAR:
+- Llama save_memory(category, content, confirm=False)
+  para datos normales.
+- Guarda una frase concreta y útil. No dupliques datos
+  que ya estén en la memoria.
+
+CUÁNDO PEDIR CONFIRMACIÓN (dato sensible):
+- Si el dato parece sensible (contraseñas, PIN, DNI,
+  tarjetas, IBAN, seguridad social), NO lo guardes
+  directamente.
+- Responde pidiendo confirmación al usuario,
+  por ejemplo: "¿Quieres que lo guarde cifrado?"
+- No inventes ni muestres el dato de nuevo.
+
+CUÁNDO ACTUALIZAR:
+- Si el usuario corrige un dato que guardabas antes
+  ("no vivo en Madrid, vivo en Barcelona"),
+  usa update_memory con la categoría correspondiente.
+
+CUÁNDO BORRAR:
+- Si el usuario pide olvidar o borrar algo de tu memoria,
+  usa delete_memory con la categoría y parte del contenido.
+
+RECUPERAR DATOS:
+- Los datos guardados en Obsidian aparecen en tu contexto
+  como memoria permanente.
+- Se guardan automáticamente en tu contexto al preguntar.
+- NUNCA inventes datos personales. Si no están en tu
+  contexto, dilo: "No tengo ese dato guardado".
 """
 
 
@@ -253,7 +313,122 @@ TOOLS = [
             },
         },
     },
+
+    {
+        "type": "function",
+        "function": {
+            "name": "save_memory",
+            "description": (
+                "Guarda un dato permanente del usuario en la memoria. "
+                "Categorías: 'Datos Personales', 'Preferencias', "
+                "'Planes y Tareas', 'Proyectos'. Para datos sensibles "
+                "usa confirm=True para pedir confirmación antes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": (
+                            "Categoría de la memoria: 'Datos Personales', "
+                            "'Preferencias', 'Planes y Tareas' o 'Proyectos'."
+                        ),
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Dato que se quiere recordar.",
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": (
+                            "Ponlo a true si es un dato sensible y hace "
+                            "falta confirmación del usuario. Default false."
+                        ),
+                    },
+                },
+                "required": ["category", "content"],
+            },
+        },
+    },
+
+    {
+        "type": "function",
+        "function": {
+            "name": "update_memory",
+            "description": (
+                "Actualiza un dato ya guardado en la memoria cuando el "
+                "usuario corrige o cambia información previa."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": "Categoría de la memoria.",
+                    },
+                    "old_content": {
+                        "type": "string",
+                        "description": "El dato antiguo a sustituir.",
+                    },
+                    "new_content": {
+                        "type": "string",
+                        "description": "El dato nuevo que lo reemplaza.",
+                    },
+                },
+                "required": ["category", "old_content", "new_content"],
+            },
+        },
+    },
+
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_memory",
+            "description": (
+                "Borra de la memoria los datos que coincidan con "
+                "content_contains. Se usa cuando el usuario pide "
+                "olvidar o borrar algo."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": "Categoría de la memoria.",
+                    },
+                    "content_contains": {
+                        "type": "string",
+                        "description": (
+                            "Parte del contenido a eliminar (coincidencia "
+                            "parcial, sin distinguir mayúsculas)."
+                        ),
+                    },
+                },
+                "required": ["category", "content_contains"],
+            },
+        },
+    },
 ]
+
+
+# ============================================================
+# MEMORIA EN SESIÓN (datos sensibles pendientes de confirmar)
+# ============================================================
+
+_pending_confirm = None
+
+
+def _reset_pending_confirm():
+    global _pending_confirm
+    _pending_confirm = None
+
+
+def _set_pending_confirm(category: str, content: str):
+    global _pending_confirm
+    _pending_confirm = {
+        "category": category,
+        "content": content,
+    }
 
 
 # ============================================================
@@ -471,6 +646,440 @@ def write_messages(message: str) -> list:
     return messages
 
 
+# ============================================================
+# FASE 1 DE MEMORIA (reglas explícitas)
+# ============================================================
+
+_AFFIRMATIVE = [
+    "sí",
+    "si",
+    "vale",
+    "ok",
+    "okey",
+    "ok vale",
+    "adelante",
+    "claro",
+    "por supuesto",
+    "guárdalo",
+    "guardalo",
+    "dalo por hecho",
+]
+
+_NEGATIVE = [
+    "no",
+    "no quiero",
+    "no guardes",
+    "mejor no",
+    "déjalo",
+    "dejalo",
+    "olvídalo",
+    "olvida lo",
+    "ignóralo",
+]
+
+
+def _is_affirmative(message: str) -> bool:
+    text = message.lower().strip()
+
+    # Puede ser una frase que empieza por "sí," etc.
+    for word in _AFFIRMATIVE:
+
+        if text == word:
+            return True
+
+        if text.startswith(word + " ") or text.startswith(word + ","):
+            return True
+
+    return False
+
+
+def _is_negative(message: str) -> bool:
+    text = message.lower().strip()
+
+    for phrase in _NEGATIVE:
+
+        if text == phrase:
+            return True
+
+        if text.startswith(phrase + " ") or text.startswith(phrase + ","):
+            return True
+
+    return False
+
+
+def handle_memory_commands(message: str):
+    """
+    Procesa comandos explícitos de memoria en la Fase 1.
+
+    Devuelve una tupla:
+        (resultado_o_None, notice)
+    donde resultado es una respuesta de texto (si se
+    resolvió sin pasar al LLM), o None si debe continuar
+    con el proceso normal.
+    notice es un string para el feedback en la GUI, o "".
+    """
+
+    global _pending_confirm
+
+    text = message.lower().strip()
+
+    # ========================================================
+    # 1) Confirmación pendiente de un dato sensible
+    # ========================================================
+
+    if _pending_confirm is not None:
+
+        if _is_affirmative(message):
+
+            category = _pending_confirm["category"]
+            content = _pending_confirm["content"]
+
+            _pending_confirm = None
+
+            # Guardar cifrado (confirm=True forzará guardado)
+            result = save_memory(
+                category,
+                content,
+                confirm=False
+            )
+
+            notice = (
+                "Dato sensible cifrado guardado "
+                f"({category})."
+            )
+
+            save_message(
+                SESSION_ID,
+                "user",
+                message
+            )
+
+            return (
+                "He guardado ese dato de forma segura.",
+                notice,
+            )
+
+        # Respuesta no afirmativa -> no guardar
+        _pending_confirm = None
+
+        save_message(
+            SESSION_ID,
+            "user",
+            message
+        )
+
+        return (
+            "De acuerdo, no lo guardo.",
+            "",
+        )
+
+    # ========================================================
+    # 2) Reglas explícitas del config
+    # ========================================================
+
+    config = load_memory_config()
+
+    reglas_explicitas = config.get(
+        "reglas_explicitas",
+        {}
+    )
+
+    # Ordenar por longitud para que "borra de tu memoria"
+    # se detecte antes que "borra"
+    reglas_sorted = sorted(
+        reglas_explicitas.keys(),
+        key=len,
+        reverse=True
+    )
+
+    for regla in reglas_sorted:
+
+        if text.startswith(regla):
+
+            accion = reglas_explicitas[regla].get("accion")
+
+            rest = message[len(regla):].strip()
+
+            if not rest:
+                continue
+
+            # Inferir categoría
+            category = infer_category(rest)
+
+            if category is None:
+                category = infer_category(message)
+
+            if category is None:
+                category = "Datos Personales"
+
+            # ---------- GUARDAR ----------
+            if accion == "save":
+
+                # Detectar sensibilidad
+                if _is_sensitive_direct(category, rest):
+
+                    # Guardar pendiente para confirmación
+                    _pending_confirm = {
+                        "category": category,
+                        "content": rest,
+                    }
+
+                    save_message(
+                        SESSION_ID,
+                        "user",
+                        message
+                    )
+
+                    return (
+                        "Ese dato parece sensible. "
+                        "¿Quieres que lo guarde cifrado?",
+                        "",
+                    )
+
+                result = save_memory(category, rest)
+
+                notice = f"Memoria guardada: {category}."
+
+                save_message(
+                    SESSION_ID,
+                    "user",
+                    message
+                )
+
+                return ("", notice)
+
+            # ---------- BORRAR ----------
+            if accion == "delete":
+
+                result = delete_memory(category, rest)
+
+                if result.startswith("OK"):
+
+                    notice = (
+                        f"Memoria borrada de {category}."
+                    )
+
+                    save_message(
+                        SESSION_ID,
+                        "user",
+                        message
+                    )
+
+                    return ("", notice)
+
+                notice = (
+                    f"No encontré eso guardado en {category}."
+                )
+
+                save_message(
+                    SESSION_ID,
+                    "user",
+                    message
+                )
+
+                return ("", notice)
+
+    # ========================================================
+    # 3) AUTO-SAVE (frases naturales: nombre, edad, gustos...)
+    # ========================================================
+
+    auto_notices = detect_auto_memory(message)
+
+    if auto_notices:
+
+        save_message(
+            SESSION_ID,
+            "user",
+            message
+        )
+
+        # Devolvemos resultado None para que el LLM también
+        # responda de forma conversacional al usuario.
+        return (None, " ".join(auto_notices))
+
+    # No se manejó con reglas
+    return (None, "")
+
+
+# ============================================================
+# AUTO-SAVE (detección por regex de frases naturales)
+# ============================================================
+
+_AUTO_PATTERNS = [
+    {
+        "regex": r"\bme llamo\s+(.+?)[?.!]*$",
+        "category": "Datos Personales",
+        "label": "Nombre",
+    },
+    {
+        "regex": r"\bmi nombre es\s+(.+?)[?.!]*$",
+        "category": "Datos Personales",
+        "label": "Nombre",
+    },
+    {
+        "regex": r"\btengo\s+(\d+)\s+años",
+        "category": "Datos Personales",
+        "label": "Edad",
+    },
+    {
+        "regex": r"\b(?:mi cumpleaños es|cumplo años el|nací el)\s+(.+?)[?.!]*$",
+        "category": "Datos Personales",
+        "label": "Cumpleaños",
+    },
+    {
+        "regex": r"\bvivo en\s+(.+?)[?.!]*$",
+        "category": "Datos Personales",
+        "label": "Ciudad",
+    },
+    {
+        "regex": r"\b(?:mi email es|mi correo es)\s+(.+?)[?.!]*$",
+        "category": "Datos Personales",
+        "label": "Email",
+    },
+    {
+        "regex": r"\b(?:trabajo de|soy)\s+(.+?)[?.!]*$",
+        "category": "Datos Personales",
+        "label": "Profesión",
+    },
+    {
+        "regex": r"\bme gusta[n]?\s+(.+?)[?.!]*$",
+        "category": "Preferencias",
+        "label": "Gustos",
+    },
+    {
+        "regex": r"\bmi favorito[a]? es\s+(.+?)[?.!]*$",
+        "category": "Preferencias",
+        "label": "Favorito",
+    },
+    {
+        "regex": r"\bprefiero\s+(.+?)[?.!]*$",
+        "category": "Preferencias",
+        "label": "Prefiere",
+    },
+]
+
+
+def detect_auto_memory(message: str):
+    """
+    Detecta frases naturales que revelan datos del usuario
+    (nombre, edad, cumpleaños, ciudad, gustos...) y los guarda
+    automáticamente en la categoría correspondiente.
+
+    Devuelve un listado de noticias ["Memoria guardada: X", ...]
+    o None si no detectó nada relevante.
+    """
+
+    text = message.strip()
+
+    # No auto-guardar preguntas
+    if text.lower().startswith((
+        "qué", "que", "cuál", "cual", "dónde", "donde",
+        "cómo", "como", "cuándo", "cuando", "quién",
+        "quien", "por qué", "por que", "puedes", "ayúdame",
+    )):
+        return None
+
+    notices = []
+
+    for pattern in _AUTO_PATTERNS:
+
+        match = re.search(
+            pattern["regex"],
+            message,
+            re.IGNORECASE
+        )
+
+        if match is None:
+            continue
+
+        category = pattern["category"]
+        label = pattern.get("label", "")
+
+        # Construir contenido: "12/12/2004" -> "Cumpleaños: ..."
+        value = match.group(1).strip()
+
+        if label == "Cumpleaños":
+
+            value = value.lstrip("el ").strip()
+            content = f"Cumpleaños: {value}"
+
+        elif label == "Edad":
+
+            content = f"Edad: {value} años"
+
+        else:
+
+            content = f"{label}: {value}" if label else value
+
+        # No guardar si el contenido parece sensible
+        if _is_sensitive_direct(category, content):
+            continue
+
+        # Upsert por etiqueta: si ya existe, se actualiza
+        if label:
+
+            result = upsert_memory_entry(
+                category,
+                label,
+                content
+            )
+
+        else:
+
+            result = save_memory_entry(category, content)
+
+        if result.startswith(("saved", "updated")):
+
+            notices.append(
+                f"Memoria guardada: {category}."
+            )
+
+    # Evitar duplicar la misma noticia (varios patrones
+    # pueden coincidir en "mi nombre es X y vivo en Y")
+    seen = set()
+    unique = []
+
+    for n in notices:
+
+        if n not in seen:
+
+            seen.add(n)
+            unique.append(n)
+
+    if not unique:
+        return None
+
+    return unique
+
+
+def _is_sensitive_direct(category: str, content: str) -> bool:
+    """
+    Comprueba si un contenido parece sensible a partir
+    del config (datos_sensibles).
+    """
+
+    config = load_memory_config()
+
+    categories = config.get("categorias", {})
+
+    settings = categories.get(category, {})
+
+    if settings.get("sensibilidad") == "alta":
+        return True
+
+    sensitive_words = config.get("datos_sensibles", [])
+
+    content_lower = content.lower()
+
+    for word in sensitive_words:
+
+        if word in content_lower:
+
+            return True
+
+    return False
+
+
 def send_payload(messages: list, stream: bool = False):
     """
     Envia la petición a Ollama.
@@ -601,6 +1210,20 @@ def ask_jarvis(message: str) -> str:
 
         # No guardamos una respuesta artificial.
         return direct_result
+
+    # ========================================================
+    # FASE 1 DE MEMORIA (reglas explícitas)
+    # ========================================================
+
+    memory_result, notice = handle_memory_commands(message)
+
+    if notice:
+
+        print(notice)
+
+    if memory_result is not None:
+
+        return memory_result
 
     # ========================================================
     # MENSAJES
@@ -739,6 +1362,64 @@ def ask_jarvis(message: str) -> str:
                     # No se genera ninguna respuesta.
                     return ""
 
+            # ================================================
+            # MEMORIA (save/update/delete)
+            # ================================================
+
+            if tool_name in [
+                "save_memory",
+                "update_memory",
+                "delete_memory"
+            ]:
+
+                category = arguments.get(
+                    "category",
+                    "Datos Personales"
+                )
+
+                if result == "NEED_CONFIRM":
+
+                    content = arguments.get(
+                        "content",
+                        ""
+                    )
+
+                    _set_pending_confirm(
+                        category,
+                        content
+                    )
+
+                elif result.startswith(
+                    "SECRET_SAVED"
+                ):
+
+                    print(
+                        "Dato sensible cifrado guardado."
+                    )
+
+                elif result.startswith("OK"):
+
+                    if tool_name == "save_memory":
+                        print(
+                            f"Memoria guardada: {category}."
+                        )
+                    elif tool_name == "update_memory":
+                        print(
+                            f"Memoria actualizada: {category}."
+                        )
+                    else:
+                        print(
+                            f"Memoria borrada: {category}."
+                        )
+
+                elif result.startswith(
+                    "NOT_FOUND"
+                ):
+
+                    print(
+                        "No encontré eso en la memoria."
+                    )
+
             # ------------------------------------------------
             # TOOL NORMAL
             # ------------------------------------------------
@@ -755,6 +1436,11 @@ def ask_jarvis(message: str) -> str:
 # ============================================================
 # JARVIS STREAMING (tokens progresivos)
 # ============================================================
+
+# Marcador para notificaciones del sistema en la GUI.
+# Cuando ask_jarvis_stream lo yield, la GUI lo muestra como
+# mensaje [SYS] en lugar de como respuesta de JARVIS.
+NOTICE_PREFIX = "__MEMNOTICE__:"
 
 def ask_jarvis_stream(message: str):
     """
@@ -778,6 +1464,22 @@ def ask_jarvis_stream(message: str):
         )
 
         yield direct_result
+
+        return
+
+    # ========================================================
+    # FASE 1 DE MEMORIA (reglas explícitas)
+    # ========================================================
+
+    memory_result, notice = handle_memory_commands(message)
+
+    if notice:
+
+        yield NOTICE_PREFIX + notice
+
+    if memory_result is not None:
+
+        yield memory_result
 
         return
 
@@ -905,6 +1607,72 @@ def ask_jarvis_stream(message: str):
 
                     # No se genera ninguna respuesta.
                     return ""
+
+            # ================================================
+            # MEMORIA (save/update/delete)
+            # ================================================
+
+            if tool_name in [
+                "save_memory",
+                "update_memory",
+                "delete_memory"
+            ]:
+
+                category = arguments.get(
+                    "category",
+                    "Datos Personales"
+                )
+
+                if result == "NEED_CONFIRM":
+
+                    # Guardar pendiente para confirmación
+                    content = arguments.get(
+                        "content",
+                        ""
+                    )
+
+                    _set_pending_confirm(
+                        category,
+                        content
+                    )
+
+                elif result.startswith(
+                    "SECRET_SAVED"
+                ):
+
+                    yield (
+                        NOTICE_PREFIX
+                        + "Dato sensible cifrado guardado."
+                    )
+
+                elif result.startswith("OK"):
+
+                    if tool_name == "save_memory":
+                        notice = (
+                            "Memoria guardada: "
+                            f"{category}."
+                        )
+                    elif tool_name == "update_memory":
+                        notice = (
+                            "Memoria actualizada: "
+                            f"{category}."
+                        )
+                    else:
+                        notice = (
+                            "Memoria borrada: "
+                            f"{category}."
+                        )
+
+                    yield NOTICE_PREFIX + notice
+
+                elif result.startswith(
+                    "NOT_FOUND"
+                ):
+
+                    yield (
+                        NOTICE_PREFIX
+                        + "No encontré eso en la memoria."
+                    )
 
             messages.append(
                 {

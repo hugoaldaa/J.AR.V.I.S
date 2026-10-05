@@ -1,0 +1,119 @@
+{
+  "categorias": {
+    "Datos Personales": {
+      "archivo": "01 - Memoria/Datos Personales.md",
+      "sensibilidad": "media",
+      "reglas": [
+        "me llamo",
+        "mi nombre es",
+        "soy yo",
+        "vivo en",
+        "mi ciudad",
+        "nací el",
+        "mi cumpleaños",
+        "tengo ",
+        "mi profesión",
+        "trabajo de",
+        "mi email",
+        "mi correo"
+      ]
+    },
+    "Preferencias": {
+      "archivo": "01 - Memoria/Preferencias.md",
+      "sensibilidad": "baja",
+      "reglas": [
+        "me gusta",
+        "me gustan",
+        "me encanta",
+        "prefiero",
+        "mi favorito",
+        "mi favorita",
+        "no me gusta",
+        "odio"
+      ]
+    },
+    "Planes y Tareas": {
+      "archivo": "01 - Memoria/Planes y Tareas.md",
+      "sensibilidad": "baja",
+      "reglas": [
+        "tengo que",
+        "voy a",
+        "quiero",
+        "me gustaría",
+        "mañana tengo",
+        "mi plan",
+        "quiero hacer",
+        "tengo pendiente"
+      ]
+    },
+    "Proyectos": {
+      "archivo": "01 - Memoria/Proyectos.md",
+      "sensibilidad": "baja",
+      "reglas": [
+        "mi proyecto",
+        "estoy trabajando en",
+        "estoy desarrollando",
+        "mi nuevo proyecto"
+      ]
+    }
+  },
+  "reglas_explicitas": {
+    "recuerda": {
+      "accion": "save",
+      "confirmar": false
+    },
+    "recuerda que": {
+      "accion": "save",
+      "confirmar": false
+    },
+    "guarda": {
+      "accion": "save",
+      "confirmar": false
+    },
+    "guarda que": {
+      "accion": "save",
+      "confirmar": false
+    },
+    "apunta": {
+      "accion": "save",
+      "confirmar": false
+    },
+    "apunta que": {
+      "accion": "save",
+      "confirmar": false
+    },
+    "olvida": {
+      "accion": "delete",
+      "confirmar": false
+    },
+    "olvídate de": {
+      "accion": "delete",
+      "confirmar": false
+    },
+    "borra": {
+      "accion": "delete",
+      "confirmar": false
+    },
+    "borra de tu memoria": {
+      "accion": "delete",
+      "confirmar": false
+    },
+    "elimina": {
+      "accion": "delete",
+      "confirmar": false
+    }
+  },
+  "clave_secrets": ".jarvis_memoria.key",
+  "datos_sensibles": [
+    "contraseña",
+    "contrase",
+    "password",
+    "pin",
+    "dni",
+    "tarjeta",
+    "iban",
+    "cuenta bancaria",
+    "numero de la seguridad social",
+    "seguridad social"
+  ]
+}

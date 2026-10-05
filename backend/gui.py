@@ -34,9 +34,10 @@ from PySide6.QtWidgets import (
     QFrame,
 )
 
-from brain import ask_jarvis_stream, warmup
+from brain import ask_jarvis_stream, warmup, NOTICE_PREFIX
 from voice import wait_for_wake_word, listen_command
 from tts import speak
+from database import init_database
 
 
 # ============================================================
@@ -92,10 +93,20 @@ class JarvisWorker(QObject):
     token = Signal(str)
     finished = Signal(str)
     error = Signal(str)
+    memory_notice = Signal(str)
 
     def __init__(self, message):
         super().__init__()
         self.message = message
+
+    @staticmethod
+    def _join_tokens(parts):
+        """
+        Une los tokens tal cual vienen del modelo.
+        Los espacios entre palabras ya están incluidos
+        en los propios tokens al inicio de cada palabra.
+        """
+        return "".join(parts)
 
     def run(self):
         try:
@@ -104,11 +115,23 @@ class JarvisWorker(QObject):
             for piece in ask_jarvis_stream(self.message):
 
                 if piece.strip():
+
+                    if piece.startswith(NOTICE_PREFIX):
+
+                        # Notificación del sistema (memoria, etc.)
+                        notice = piece[
+                            len(NOTICE_PREFIX):
+                        ].strip()
+
+                        self.memory_notice.emit(notice)
+
+                        continue
+
                     parts.append(piece)
                     self.token.emit(piece)
 
             if parts:
-                answer = "".join(parts)
+                answer = self._join_tokens(parts)
             else:
                 answer = ""
 
@@ -129,17 +152,30 @@ class TTSWorker(QObject):
     finished = Signal()
     error = Signal(str)
 
-    def __init__(self, text):
+    def __init__(self, text, voice_worker=None):
         super().__init__()
         self.text = text
+        self.voice_worker = voice_worker
 
     @Slot()
     def run(self):
         try:
+            # Pausar escucha mientras JARVIS habla
+            if self.voice_worker:
+                self.voice_worker.set_tts_active(True)
+
             speak(self.text)
+
+            # Reanudar escucha después de hablar
+            if self.voice_worker:
+                self.voice_worker.set_tts_active(False)
+
             self.finished.emit()
 
         except Exception as e:
+            # Asegurar que se reanuda la escucha en caso de error
+            if self.voice_worker:
+                self.voice_worker.set_tts_active(False)
             self.error.emit(str(e))
 
 
@@ -157,6 +193,7 @@ class VoiceWorker(QObject):
     def __init__(self):
         super().__init__()
         self.running = True
+        self.tts_active = False
 
     @Slot()
     def run(self):
@@ -165,12 +202,21 @@ class VoiceWorker(QObject):
 
             try:
 
+                # No escuchar mientras JARVIS habla
+                if self.tts_active:
+                    time.sleep(0.1)
+                    continue
+
                 score = wait_for_wake_word(self._stop_event())
 
                 if not self.running:
                     break
 
                 if score is None:
+                    continue
+
+                # No procesar si JARVIS empezó a hablar
+                if self.tts_active:
                     continue
 
                 self.wake_detected.emit(score)
@@ -181,6 +227,10 @@ class VoiceWorker(QObject):
 
                 if not self.running:
                     break
+
+                # No procesar comando si JARVIS habló
+                if self.tts_active:
+                    continue
 
                 if command:
                     self.command_detected.emit(command)
@@ -207,6 +257,9 @@ class VoiceWorker(QObject):
 
     def stop(self):
         self.running = False
+
+    def set_tts_active(self, active):
+        self.tts_active = active
 
 
 # ============================================================
@@ -581,6 +634,9 @@ class JarvisWindow(QMainWindow):
         self.setup_ui()
 
         self.start_voice()
+
+        # Inicializar base de datos
+        init_database()
 
         # Calentar el modelo en segundo plano para evitar
         # los ~25s de arranque en frío en el primer mensaje.
@@ -967,6 +1023,35 @@ class JarvisWindow(QMainWindow):
             .replace("\n", "<br>")
         )
 
+    @staticmethod
+    def escape_html_preserve_spaces(text):
+        """
+        Escapa HTML y convierte los espacios INICIALES del
+        texto en &nbsp; para que Qt no los colapse.
+        Los espacios internos quedan normales para permitir
+        saltos de línea.
+        """
+        escaped = (
+            text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\n", "<br>")
+        )
+
+        # Contar cuántos espacios iniciales hay
+        count = 0
+        for ch in text:
+            if ch == " ":
+                count += 1
+            else:
+                break
+
+        if count > 0:
+            escaped = "&nbsp;" * count + escaped[count:]
+
+        return escaped
+
     def scroll_chat(self):
         scrollbar = self.chat.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
@@ -1060,6 +1145,7 @@ class JarvisWindow(QMainWindow):
         worker.token.connect(self.on_token)
         worker.finished.connect(self.on_response)
         worker.error.connect(self.on_error)
+        worker.memory_notice.connect(self.on_memory_notice)
 
         thread = threading.Thread(
             target=worker.run,
@@ -1089,11 +1175,21 @@ class JarvisWindow(QMainWindow):
 
         cursor = self.chat.textCursor()
         cursor.movePosition(QTextCursor.End)
-        cursor.insertHtml(
-            self.escape_html(piece)
-        )
+
+        # NO añadimos espacios manualmente: el modelo ya los
+        # incluye en sus tokens (un espacio inicial = palabra
+        # nueva). Solo convertimos los espacios a &nbsp; para
+        # que Qt no los colapse al insertar HTML.
+        html = self.escape_html_preserve_spaces(piece)
+
+        cursor.insertHtml(f"<span>{html}</span>")
 
         self.scroll_chat()
+
+    @Slot(str)
+    def on_memory_notice(self, notice):
+
+        self.append_system_message(notice)
 
     @Slot(str)
     def on_response(self, answer):
@@ -1125,7 +1221,7 @@ class JarvisWindow(QMainWindow):
 
     def start_tts(self, text):
 
-        worker = TTSWorker(text)
+        worker = TTSWorker(text, self.voice_worker)
 
         worker.finished.connect(self.on_tts_finished)
         worker.error.connect(self.on_tts_error)
